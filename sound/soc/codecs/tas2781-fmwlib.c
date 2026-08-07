@@ -12,6 +12,7 @@
 #include <linux/i2c.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
+#include <linux/limits.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
@@ -31,6 +32,10 @@
 #define TAS2781_YRAM_BOOK1			140
 #define TAS2781_YRAM1_PAGE			42
 #define TAS2781_YRAM1_START_REG			88
+
+#define TAS2781_PG_REG		TASDEVICE_REG(0x00, 0x00, 0x7c)
+#define TAS2781_PG_1_0		0xA0
+#define TAS2781_PG_2_0		0xA8
 
 #define TAS2781_YRAM2_START_PAGE		43
 #define TAS2781_YRAM2_END_PAGE			49
@@ -96,6 +101,12 @@ struct tas_crc {
 struct blktyp_devidx_map {
 	unsigned char blktyp;
 	unsigned char dev_idx;
+};
+
+struct tas2781_cali_specific {
+	unsigned char sin_gni[4];
+	int sin_gni_reg;
+	bool is_sin_gn_flush;
 };
 
 static const char deviceNumber[TASDEVICE_DSP_TAS_MAX_DEVICE] = {
@@ -911,7 +922,8 @@ static int tasdevice_process_block(void *context, unsigned char *data,
 						data[subblk_offset + 1],
 						data[subblk_offset + 2]),
 					data[subblk_offset + 3]);
-				if (rc < 0) {
+				if (rc < 0 &&
+				    !(tas_priv->isspi && rc == -EXDEV)) {
 					is_err = true;
 					dev_err(tas_priv->dev,
 					"process_block: single write error\n");
@@ -943,7 +955,7 @@ static int tasdevice_process_block(void *context, unsigned char *data,
 				data[subblk_offset + 1],
 				data[subblk_offset + 2]),
 				&(data[subblk_offset + 4]), len);
-			if (rc < 0) {
+			if (rc < 0 && !(tas_priv->isspi && rc == -EXDEV)) {
 				is_err = true;
 				dev_err(tas_priv->dev,
 					"%s: bulk_write error = %d\n",
@@ -981,7 +993,7 @@ static int tasdevice_process_block(void *context, unsigned char *data,
 				data[subblk_offset + 4]),
 				data[subblk_offset + 1],
 				data[subblk_offset + 5]);
-			if (rc < 0) {
+			if (rc < 0 && !(tas_priv->isspi && rc == -EXDEV)) {
 				is_err = true;
 				dev_err(tas_priv->dev,
 					"%s: update_bits error = %d\n",
@@ -1089,13 +1101,42 @@ static int tasdevice_load_block_kernel(
 	return 0;
 }
 
+static int tasdevice_fw_strnlen(const struct firmware *fmw, int offset)
+{
+	const u8 *start;
+	const u8 *nul;
+	size_t remaining;
+	size_t len;
+
+	if (offset < 0 || offset >= fmw->size)
+		return -EINVAL;
+
+	start = fmw->data + offset;
+	remaining = fmw->size - offset;
+	nul = memchr(start, '\0', remaining);
+	if (!nul)
+		return -EINVAL;
+
+	len = nul - start;
+	if (len > INT_MAX)
+		return -EOVERFLOW;
+
+	return len;
+}
+
 static int fw_parse_variable_hdr(struct tasdevice_priv
 	*tas_priv, struct tasdevice_dspfw_hdr *fw_hdr,
 	const struct firmware *fmw, int offset)
 {
 	const unsigned char *buf = fmw->data;
-	int len = strlen((char *)&buf[offset]);
+	int len;
 
+	len = tasdevice_fw_strnlen(fmw, offset);
+	if (len < 0) {
+		dev_err(tas_priv->dev, "%s: Description error\n", __func__);
+		offset = len;
+		goto out;
+	}
 	len++;
 
 	if (offset + len + 8 > fmw->size) {
@@ -1227,7 +1268,12 @@ static int fw_parse_data(struct tasdevice_fw *tas_fmw,
 	memcpy(img_data->name, &data[offset], 64);
 	offset += 64;
 
-	n = strlen((char *)&data[offset]);
+	n = tasdevice_fw_strnlen(fmw, offset);
+	if (n < 0) {
+		dev_err(tas_fmw->dev, "%s: Description error\n", __func__);
+		offset = n;
+		goto out;
+	}
 	n++;
 	if (offset + n + 2 > fmw->size) {
 		dev_err(tas_fmw->dev, "%s: Description error\n", __func__);
@@ -1298,7 +1344,12 @@ static int fw_parse_program_data(struct tasdevice_priv *tas_priv,
 		}
 		offset += 64;
 
-		n = strlen((char *)&buf[offset]);
+		n = tasdevice_fw_strnlen(fmw, offset);
+		if (n < 0) {
+			dev_err(tas_priv->dev, "Description err\n");
+			offset = n;
+			goto out;
+		}
 		/* skip '\0' and 5 unused bytes */
 		n += 6;
 		if (offset + n > fmw->size) {
@@ -1361,7 +1412,12 @@ static int fw_parse_configuration_data(
 		memcpy(config->name, &data[offset], 64);
 		offset += 64;
 
-		n = strlen((char *)&data[offset]);
+		n = tasdevice_fw_strnlen(fmw, offset);
+		if (n < 0) {
+			dev_err(tas_priv->dev, "Description err\n");
+			offset = n;
+			goto out;
+		}
 		n += 15;
 		if (offset + n > fmw->size) {
 			dev_err(tas_priv->dev, "Description err\n");
@@ -2123,7 +2179,8 @@ static int fw_parse_calibration_data(struct tasdevice_priv *tas_priv,
 {
 	struct tasdevice_calibration *calibration;
 	unsigned char *data = (unsigned char *)fmw->data;
-	unsigned int i, n;
+	unsigned int i;
+	int n;
 
 	if (offset + 2 > fmw->size) {
 		dev_err(tas_priv->dev, "%s: Calibrations error\n", __func__);
@@ -2155,7 +2212,12 @@ static int fw_parse_calibration_data(struct tasdevice_priv *tas_priv,
 		calibration = &(tas_fmw->calibrations[i]);
 		offset += 64;
 
-		n = strlen((char *)&data[offset]);
+		n = tasdevice_fw_strnlen(fmw, offset);
+		if (n < 0) {
+			dev_err(tas_priv->dev, "Description err\n");
+			offset = n;
+			goto out;
+		}
 		/* skip '\0' and 2 unused bytes */
 		n += 3;
 		if (offset + n > fmw->size) {
@@ -2454,6 +2516,83 @@ static int tasdevice_load_data(struct tasdevice_priv *tas_priv,
 	return ret;
 }
 
+static int tas2781_cali_preproc(struct tasdevice_priv *priv, int i)
+{
+	struct tas2781_cali_specific *spec = priv->tasdevice[i].cali_specific;
+	struct calidata *cali_data = &priv->cali_data;
+	struct cali_reg *p = &cali_data->cali_reg_array;
+	unsigned char *data = cali_data->data;
+	int rc;
+
+	/*
+	 * On TAS2781, if the Speaker calibrated impedance is lower than
+	 * default value hard-coded inside the TAS2781, it will cuase vol
+	 * lower than normal. In order to fix this issue, the parameter of
+	 * SineGainI need updating.
+	 */
+	if (spec == NULL) {
+		int k = i * (cali_data->cali_dat_sz_per_dev + 1);
+		int re_org, re_cal, corrected_sin_gn, pg_id;
+		unsigned char r0_deflt[4];
+
+		spec = devm_kzalloc(priv->dev, sizeof(*spec), GFP_KERNEL);
+		if (spec == NULL)
+			return -ENOMEM;
+		priv->tasdevice[i].cali_specific = spec;
+		rc = priv->dev_bulk_read(priv, i, p->r0_reg, r0_deflt, 4);
+		if (rc < 0) {
+			dev_err(priv->dev, "invalid RE from %d = %d\n", i, rc);
+			return rc;
+		}
+		/*
+		 * SineGainI need to be re-calculated, calculate the high 16
+		 * bits.
+		 */
+		re_org = r0_deflt[0] << 8 | r0_deflt[1];
+		re_cal = data[k + 1] << 8 | data[k + 2];
+		if (re_org > re_cal) {
+			rc = tasdevice_dev_read(priv, i, TAS2781_PG_REG,
+						 &pg_id);
+			if (rc < 0) {
+				dev_err(priv->dev, "invalid PG id %d = %d\n",
+					i, rc);
+				return rc;
+			}
+
+			spec->sin_gni_reg = (pg_id == TAS2781_PG_1_0) ?
+				TASDEVICE_REG(0, 0x1b, 0x34) :
+				TASDEVICE_REG(0, 0x18, 0x1c);
+
+			rc = priv->dev_bulk_read(priv, i, spec->sin_gni_reg,
+						 spec->sin_gni, 4);
+			if (rc < 0) {
+				dev_err(priv->dev, "wrong sinegaini %d = %d\n",
+					i, rc);
+				return rc;
+			}
+			corrected_sin_gn = re_org * ((spec->sin_gni[0] << 8) +
+						       spec->sin_gni[1]);
+			corrected_sin_gn /= re_cal;
+			spec->sin_gni[0] = corrected_sin_gn >> 8;
+			spec->sin_gni[1] = corrected_sin_gn & 0xff;
+
+			spec->is_sin_gn_flush = true;
+		}
+	}
+
+	if (spec->is_sin_gn_flush) {
+		rc = tasdevice_dev_bulk_write(priv, i, spec->sin_gni_reg,
+						       spec->sin_gni, 4);
+		if (rc < 0) {
+			dev_err(priv->dev, "update failed %d = %d\n",
+				i, rc);
+			return rc;
+		}
+	}
+
+	return 0;
+}
+
 static void tasdev_load_calibrated_data(struct tasdevice_priv *priv, int i)
 {
 	struct calidata *cali_data = &priv->cali_data;
@@ -2462,12 +2601,21 @@ static void tasdev_load_calibrated_data(struct tasdevice_priv *priv, int i)
 	int k = i * (cali_data->cali_dat_sz_per_dev + 1);
 	int rc;
 
+	if (!data || !cali_data->total_sz)
+		return;
+
 	if (data[k] != i) {
 		dev_err(priv->dev, "%s: no cal-data for dev %d from usr-spc\n",
 			__func__, i);
 		return;
 	}
 	k++;
+
+	if (priv->chip_id == TAS2781) {
+		rc = tas2781_cali_preproc(priv, i);
+		if (rc < 0)
+			return;
+	}
 
 	rc = tasdevice_dev_bulk_write(priv, i, p->r0_reg, &(data[k]), 4);
 	if (rc < 0) {

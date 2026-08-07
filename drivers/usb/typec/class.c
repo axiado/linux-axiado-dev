@@ -686,10 +686,6 @@ typec_register_altmode(struct device *parent,
 
 	alt->adev.dev.bus = &typec_bus;
 
-	/* Plug alt modes need a class to generate udev events. */
-	if (is_typec_plug(parent))
-		alt->adev.dev.class = &typec_class;
-
 	ret = device_register(&alt->adev.dev);
 	if (ret) {
 		dev_err(parent, "failed to register alternate mode (%d)\n",
@@ -1623,6 +1619,7 @@ static ssize_t select_usb_power_delivery_store(struct device *dev,
 		return -EINVAL;
 
 	ret = port->ops->pd_set(port, pd);
+	put_device(&pd->dev);
 	if (ret)
 		return ret;
 

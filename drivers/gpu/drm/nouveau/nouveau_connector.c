@@ -1132,7 +1132,7 @@ nouveau_connector_best_encoder(struct drm_connector *connector)
 }
 
 static int
-nouveau_connector_atomic_check(struct drm_connector *connector, struct drm_atomic_state *state)
+nouveau_connector_atomic_check(struct drm_connector *connector, struct drm_atomic_commit *state)
 {
 	struct nouveau_connector *nv_conn = nouveau_connector(connector);
 	struct drm_connector_state *conn_state =
@@ -1229,6 +1229,9 @@ nouveau_connector_aux_xfer(struct drm_dp_aux *obj, struct drm_dp_aux_msg *msg)
 	struct nouveau_encoder *nv_encoder;
 	u8 size = msg->size;
 	int ret;
+
+	if (pm_runtime_suspended(nv_connector->base.dev->dev))
+		return -EBUSY;
 
 	nv_encoder = find_encoder(&nv_connector->base, DCB_OUTPUT_DP);
 	if (!nv_encoder)

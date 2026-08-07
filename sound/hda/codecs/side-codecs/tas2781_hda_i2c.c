@@ -14,7 +14,6 @@
 #include <linux/efi.h>
 #include <linux/firmware.h>
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/pci_ids.h>
 #include <linux/pm_runtime.h>
@@ -60,7 +59,6 @@ struct tas2781_hda_i2c_priv {
 	int (*save_calibration)(struct tas2781_hda *h);
 
 	int hda_chip_id;
-	bool skip_calibration;
 };
 
 static int tas2781_get_i2c_res(struct acpi_resource *ares, void *data)
@@ -356,6 +354,7 @@ static int tas2563_save_calibration(struct tas2781_hda *h)
 			if (ret < 0 || ret >= sizeof(var8) - 1) {
 				dev_err(p->dev, "%s: Read %s failed\n",
 					__func__, var8);
+				cd->total_sz = 0;
 				return -EINVAL;
 			}
 			/*
@@ -373,6 +372,7 @@ static int tas2563_save_calibration(struct tas2781_hda *h)
 				dev_warn(p->dev,
 					"Dev %d: Caldat[%d] read failed %ld\n",
 					i, j, status);
+				cd->total_sz = 0;
 				return -EINVAL;
 			}
 			bedata = cpu_to_be32(*(uint32_t *)&data[offset]);
@@ -384,6 +384,7 @@ static int tas2563_save_calibration(struct tas2781_hda *h)
 	if (cd->total_sz != offset) {
 		dev_err(p->dev, "%s: tot_size(%lu) and offset(%u) mismatch\n",
 			__func__, cd->total_sz, offset);
+		cd->total_sz = 0;
 		return -EINVAL;
 	}
 
@@ -479,8 +480,7 @@ static void tasdevice_dspfw_init(void *context)
 	/* If calibrated data occurs error, dsp will still works with default
 	 * calibrated data inside algo.
 	 */
-	if (!hda_priv->skip_calibration)
-		hda_priv->save_calibration(tas_hda);
+	hda_priv->save_calibration(tas_hda);
 }
 
 static void tasdev_fw_ready(const struct firmware *fmw, void *context)
@@ -535,7 +535,6 @@ static int tas2781_hda_bind(struct device *dev, struct device *master,
 	void *master_data)
 {
 	struct tas2781_hda *tas_hda = dev_get_drvdata(dev);
-	struct tas2781_hda_i2c_priv *hda_priv = tas_hda->hda_priv;
 	struct hda_component_parent *parent = master_data;
 	struct hda_component *comp;
 	struct hda_codec *codec;
@@ -564,14 +563,6 @@ static int tas2781_hda_bind(struct device *dev, struct device *master,
 		break;
 	}
 
-	/*
-	 * Using ASUS ROG Xbox Ally X (RC73XA) UEFI calibration data
-	 * causes audio dropouts during playback, use fallback data
-	 * from DSP firmware as a workaround.
-	 */
-	if (codec->core.subsystem_id == 0x10431384)
-		hda_priv->skip_calibration = true;
-
 	guard(pm_runtime_active_auto)(dev);
 
 	comp->dev = dev;
@@ -598,6 +589,9 @@ static void tas2781_hda_unbind(struct device *dev,
 		memset(comp->name, 0, sizeof(comp->name));
 		comp->playback_hook = NULL;
 	}
+
+	request_firmware_nowait_cancel(tas_hda->priv->dev, tas_hda->priv,
+				       tasdev_fw_ready);
 
 	tas2781_hda_remove_controls(tas_hda);
 
@@ -643,6 +637,7 @@ static int tas2781_hda_i2c_probe(struct i2c_client *clt)
 		 */
 		device_name = "TIAS2781";
 		hda_priv->hda_chip_id = HDA_TAS2781;
+		tas_hda->priv->chip_id = TAS2781;
 		hda_priv->save_calibration = tas2781_save_calibration;
 		tas_hda->priv->global_addr = TAS2781_GLOBAL_ADDR;
 	} else if (strstarts(dev_name(&clt->dev), "i2c-TXNW2770")) {
@@ -656,6 +651,7 @@ static int tas2781_hda_i2c_probe(struct i2c_client *clt)
 			     "i2c-TXNW2781:00-tas2781-hda.0")) {
 		device_name = "TXNW2781";
 		hda_priv->hda_chip_id = HDA_TAS2781;
+		tas_hda->priv->chip_id = TAS2781;
 		hda_priv->save_calibration = tas2781_save_calibration;
 		tas_hda->priv->global_addr = TAS2781_GLOBAL_ADDR;
 	} else if (strstr(dev_name(&clt->dev), "INT8866")) {
@@ -800,8 +796,8 @@ static const struct dev_pm_ops tas2781_hda_pm_ops = {
 };
 
 static const struct i2c_device_id tas2781_hda_i2c_id[] = {
-	{ "tas2781-hda" },
-	{}
+	{ .name = "tas2781-hda" },
+	{ }
 };
 
 static const struct acpi_device_id tas2781_acpi_hda_match[] = {

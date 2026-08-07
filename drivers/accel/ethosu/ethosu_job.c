@@ -143,16 +143,9 @@ out:
 	return ret;
 }
 
-static void ethosu_job_cleanup(struct kref *ref)
+static void ethosu_job_err_cleanup(struct ethosu_job *job)
 {
-	struct ethosu_job *job = container_of(ref, struct ethosu_job,
-						refcount);
 	unsigned int i;
-
-	pm_runtime_put_autosuspend(job->dev->base.dev);
-
-	dma_fence_put(job->done_fence);
-	dma_fence_put(job->inference_done_fence);
 
 	for (i = 0; i < job->region_cnt; i++)
 		drm_gem_object_put(job->region_bo[i]);
@@ -160,6 +153,19 @@ static void ethosu_job_cleanup(struct kref *ref)
 	drm_gem_object_put(job->cmd_bo);
 
 	kfree(job);
+}
+
+static void ethosu_job_cleanup(struct kref *ref)
+{
+	struct ethosu_job *job = container_of(ref, struct ethosu_job,
+						refcount);
+
+	pm_runtime_put_autosuspend(job->dev->base.dev);
+
+	dma_fence_put(job->done_fence);
+	dma_fence_put(job->inference_done_fence);
+
+	ethosu_job_err_cleanup(job);
 }
 
 static void ethosu_job_put(struct ethosu_job *job)
@@ -290,7 +296,6 @@ int ethosu_job_init(struct ethosu_device *edev)
 	struct device *dev = edev->base.dev;
 	struct drm_sched_init_args args = {
 		.ops = &ethosu_sched_ops,
-		.num_rqs = DRM_SCHED_PRIORITY_COUNT,
 		.credit_limit = 1,
 		.timeout = msecs_to_jiffies(JOB_TIMEOUT_MS),
 		.name = dev_name(dev),
@@ -411,9 +416,21 @@ static int ethosu_ioctl_submit_job(struct drm_device *dev, struct drm_file *file
 		struct drm_gem_object *gem;
 
 		/* Can only omit a BO handle if the region is not used or used for SRAM */
-		if (!job->region_bo_handles[i] &&
-		    (!cmd_info->region_size[i] || (i == ETHOSU_SRAM_REGION && job->sram_size)))
-			continue;
+		if (!job->region_bo_handles[i]) {
+			if (!cmd_info->region_size[i])
+				continue;
+			if (i == ETHOSU_SRAM_REGION) {
+				if (cmd_info->region_size[i] <= edev->npu_info.sram_size)
+					continue;
+
+				dev_err(dev->dev,
+					"cmd stream region %d size greater than SRAM size (%llu > %u)\n",
+					i, cmd_info->region_size[i],
+					edev->npu_info.sram_size);
+				ret = -EINVAL;
+				goto out_cleanup_job;
+			}
+		}
 
 		if (job->region_bo_handles[i] && !cmd_info->region_size[i]) {
 			dev_err(dev->dev,
@@ -454,12 +471,16 @@ static int ethosu_ioctl_submit_job(struct drm_device *dev, struct drm_file *file
 		}
 	}
 	ret = ethosu_job_push(ejob);
+	if (!ret) {
+		ethosu_job_put(ejob);
+		return 0;
+	}
 
 out_cleanup_job:
 	if (ret)
 		drm_sched_job_cleanup(&ejob->base);
 out_put_job:
-	ethosu_job_put(ejob);
+	ethosu_job_err_cleanup(ejob);
 
 	return ret;
 }

@@ -69,6 +69,28 @@ static const struct snd_soc_acpi_endpoint jack_amp_g1_dmic_endpoints[] = {
 	},
 };
 
+static const struct snd_soc_acpi_endpoint jack_dmic_endpoints[] = {
+	/* Jack Endpoint */
+	{
+		.num = 0,
+		.aggregated = 0,
+		.group_position = 0,
+		.group_id = 0,
+	},
+	/* DMIC Endpoint */
+	{
+		/*
+		 * rt721 endpoint #2 maps to AIF3 (internal DMIC capture).
+		 * Endpoint #1 is AIF2 amp path and is handled by external amps
+		 * on this platform.
+		 */
+		.num = 2,
+		.aggregated = 0,
+		.group_position = 0,
+		.group_id = 0,
+	},
+};
+
 static const struct snd_soc_acpi_adr_device rt712_vb_1_group1_adr[] = {
 	{
 		.adr = 0x000130025D071201ull,
@@ -531,6 +553,46 @@ static const struct snd_soc_acpi_link_adr acp70_rt722_l0_rt1320_l1[] = {
 	{}
 };
 
+static const struct snd_soc_acpi_adr_device tas2783_2_adr[] = {
+	{
+		/* left */
+		.adr = 0x00003c0102000001ull,
+		.num_endpoints = 1,
+		.endpoints = &spk_l_endpoint,
+		.name_prefix = "tas2783-1",
+	},
+	{
+		/* right */
+		.adr = 0x00003d0102000001ull,
+		.num_endpoints = 1,
+		.endpoints = &spk_l_endpoint,
+		.name_prefix = "tas2783-2",
+	},
+	{
+		/* left */
+		.adr = 0x0000390102000001ull,
+		.num_endpoints = 1,
+		.endpoints = &spk_r_endpoint,
+		.name_prefix = "tas2783-3",
+	},
+	{
+		/* right */
+		.adr = 0x00003a0102000001ull,
+		.num_endpoints = 1,
+		.endpoints = &spk_r_endpoint,
+		.name_prefix = "tas2783-4",
+	},
+};
+
+static const struct snd_soc_acpi_link_adr acp70_tas2783_2[] = {
+	{
+		.mask = BIT(0),
+		.num_adr = ARRAY_SIZE(tas2783_2_adr),
+		.adr_d = tas2783_2_adr,
+	},
+	{}
+};
+
 static const struct snd_soc_acpi_adr_device rt1320_0_single_adr[] = {
 	{
 		.adr = 0x000030025D132001ull,
@@ -563,7 +625,85 @@ static const struct snd_soc_acpi_link_adr acp70_rt1320_l0_rt722_l1[] = {
 	{}
 };
 
+static const struct snd_soc_acpi_adr_device rt721_l1u0_tas2783x2_l1u8b_adr[] = {
+	{
+		.adr = 0x000130025D072101ull,
+		/*
+		 * On this platform speakers are provided by two TAS2783 amps.
+		 * Keep rt721 as UAJ + DMIC only.
+		 */
+		.num_endpoints = ARRAY_SIZE(jack_dmic_endpoints),
+		.endpoints = jack_dmic_endpoints,
+		.name_prefix = "rt721",
+	},
+	{
+		.adr = 0x0001380102000001ull,
+		.num_endpoints = 1,
+		.endpoints = &spk_l_endpoint,
+		.name_prefix = "tas2783-1",
+	},
+	{
+		.adr = 0x00013B0102000001ull,
+		.num_endpoints = 1,
+		.endpoints = &spk_r_endpoint,
+		.name_prefix = "tas2783-2",
+	},
+};
+
+static const struct snd_soc_acpi_link_adr acp70_rt721_l1u0_tas2783x2_l1u8b[] = {
+	{
+		.mask = BIT(1),
+		.num_adr = ARRAY_SIZE(rt721_l1u0_tas2783x2_l1u8b_adr),
+		.adr_d = rt721_l1u0_tas2783x2_l1u8b_adr,
+	},
+	{}
+};
+
+static const struct snd_soc_acpi_endpoint rt721_endpoints[] = {
+	{ /* Jack Playback/Capture Endpoint (AIF1) */
+		.num = 0,
+		.aggregated = 0,
+		.group_position = 0,
+		.group_id = 0,
+	},
+	{ /* Speaker Amplifier Endpoint (AIF2, internal amp) */
+		.num = 1,
+		.aggregated = 0,
+		.group_position = 0,
+		.group_id = 0,
+	},
+	{ /* DMIC Capture Endpoint (AIF3) */
+		.num = 2,
+		.aggregated = 0,
+		.group_position = 0,
+		.group_id = 0,
+	},
+};
+
+static const struct snd_soc_acpi_adr_device rt721_1_single_adr[] = {
+	{
+		.adr = 0x000130025D072101ull,
+		.num_endpoints = ARRAY_SIZE(rt721_endpoints),
+		.endpoints = rt721_endpoints,
+		.name_prefix = "rt721"
+	}
+};
+
+static const struct snd_soc_acpi_link_adr acp70_rt721_only[] = {
+	{
+		.mask = BIT(1),
+		.num_adr = ARRAY_SIZE(rt721_1_single_adr),
+		.adr_d = rt721_1_single_adr,
+	},
+	{}
+};
+
 struct snd_soc_acpi_mach snd_soc_acpi_amd_acp70_sdw_machines[] = {
+	{
+		.link_mask = BIT(0),
+		.links = acp70_tas2783_2,
+		.drv_name = "amd_sdw",
+	},
 	{
 		.link_mask = BIT(0) | BIT(1),
 		.links = acp70_rt1320_l0_rt722_l1,
@@ -650,6 +790,16 @@ struct snd_soc_acpi_mach snd_soc_acpi_amd_acp70_sdw_machines[] = {
 		.machine_check = snd_soc_acpi_amd_sdca_is_device_rt712_vb,
 		.drv_name = "amd_sdw",
 	},
+	{
+		.link_mask = BIT(1),
+		.links = acp70_rt721_l1u0_tas2783x2_l1u8b,
+		.drv_name = "amd_sdw",
+	},
+	{
+		.link_mask = BIT(1),
+		.links = acp70_rt721_only,
+		.drv_name = "amd_sdw",
+	},
 	{},
 };
 EXPORT_SYMBOL(snd_soc_acpi_amd_acp70_sdw_machines);
@@ -670,5 +820,5 @@ MODULE_DESCRIPTION("AMD ACP7.0 & ACP7.1 tables and support for ACPI enumeration"
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Vijendar.Mukunda@amd.com");
 #if IS_ENABLED(CONFIG_SND_SOC_ACPI_AMD_SDCA_QUIRKS)
-MODULE_IMPORT_NS("SND_SOC_ACPI_AMD_SDCA_QUIRKS");
+MODULE_IMPORT_NS("SND_SOC_SDCA");
 #endif
